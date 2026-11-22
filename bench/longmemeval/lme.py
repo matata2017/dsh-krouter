@@ -1,0 +1,314 @@
+#!/usr/bin/env python3
+"""Set 7 (HELDOUT.md): KRouter and a BM25 floor on LongMemEval, scored from the benchmark authors' own labels.
+
+LongMemEval (Wu et al., ICLR 2025) gives each of its 500 questions a haystack of about 50 dated chat sessions and
+labels which sessions hold the answer. Each question becomes its own small vault, one Markdown page per session, and
+each system answers with up to three cited pages or a refusal. Scoring needs no model:
+
+- evidence cited (answerable questions): a cited page is an answer session;
+- knowledge update: the cited pages include the latest-dated answer session; "stale only" = an earlier one, not it;
+- abstention (`_abs` questions): refused; against it, refusals on the answerable questions.
+
+The dataset is not in this repository and this script downloads nothing; pass the file you fetched:
+
+    python3 bench/longmemeval/lme.py convert --data longmemeval_s_cleaned.json
+    python3 bench/longmemeval/lme.py run --system krouter
+    python3 bench/longmemeval/lme.py run --system bm25-floor
+    python3 bench/longmemeval/lme.py score
+
+The dense prototype (`bench/memory_honesty/dense.py`, local embeddings, floors from dev3) runs on a seed-drawn sample
+of the answerable questions; those are seen (HELDOUT.md, set 7 amendment), so its numbers are marked as such:
+
+    KROUTER_DENSE_MODEL=BAAI/bge-m3 python3 bench/longmemeval/lme.py run --system rescue --sample 60
+    python3 bench/longmemeval/lme.py run --system krouter-inproc --sample 60   # the same sample, KRouter in-process
+
+Set 14 (HELDOUT.md) asks whether the refusal gate can be raised without losing answerable questions. Its data step:
+
+    python3 bench/longmemeval/lme.py ablate        # each answerable question's vault with its answer sessions removed
+    python3 bench/longmemeval/gate_study.py        # features, the development-half rule search, no model
+
+State (vaults, outputs, report) lives in `~/.local/state/krouter-eval/lme/` (`KROUTER_LME_STATE` to move it).
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import random
+import re
+import shutil
+import sys
+from datetime import datetime
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+REPO = HERE.parents[1]
+STATE = Path(os.environ.get("KROUTER_LME_STATE") or Path.home() / ".local/state/krouter-eval/lme")
+SESSIONS = "05 时间日志/会话摘录"  # KRouter 自己导入会话时放的位置
+SEED = 20261018
+SPLIT_SEED = 20261110  # set 14: which half of the 470 answerable questions is the development half
+RESAMPLES = 10_000
+DENSE_SYSTEMS = {"dense", "dense-floor", "agree", "rescue"}
+
+
+def day_of(raw: str) -> str:
+    """LongMemEval dates look like `2023/05/20 (Sat) 02:21`."""
+    m = re.match(r"(\d{4})/(\d{2})/(\d{2})", raw or "")
+    return f"{m.group(1)}-{m.group(2)}-{m.group(3)}" if m else ""
+
+
+def page_name(day: str, sid: str) -> str:
+    return f"{day} {re.sub(r'[^A-Za-z0-9_-]', '_', sid)}.md"
+
+
+def convert(data: Path) -> None:
+    items = json.loads(data.read_text(encoding="utf-8"))
+    vaults = STATE / "vaults"
+    if vaults.exists():
+        shutil.rmtree(vaults)
+    meta = []
+    for it in items:
+        qid = it["question_id"]
+        root = vaults / re.sub(r"[^A-Za-z0-9_-]", "_", qid) / SESSIONS
+        root.mkdir(parents=True)
+        pages = {}
+        for sid, raw_day, turns in zip(it["haystack_session_ids"], it["haystack_dates"], it["haystack_sessions"],
+                                       strict=True):
+            day = day_of(raw_day)
+            name = page_name(day, sid)
+            body = [f"---\ntitle: Session {day}\ndate: {day}\nsource: longmemeval\n---\n", f"# Session {day}\n"]
+            for t in turns:
+                body.append(f"**{t.get('role', '?')}:** {t.get('content', '').strip()}\n")
+            (root / name).write_text("\n".join(body), encoding="utf-8")
+            pages[f"{SESSIONS}/{name}"] = {"sid": sid, "day": day}
+        answer = set(it.get("answer_session_ids") or [])
+        meta.append({"id": qid, "q": it["question"], "type": it["question_type"], "abs": qid.endswith("_abs"),
+                     "date": day_of(it.get("question_date", "")), "answer_sessions": sorted(answer),
+                     "vault": str(root.parents[1]), "pages": pages})
+    (STATE / "questions.jsonl").write_text("".join(json.dumps(m, ensure_ascii=False) + "\n" for m in meta),
+                                           encoding="utf-8")
+    print(json.dumps({"questions": len(meta), "abs": sum(m["abs"] for m in meta),
+                      "knowledge_update": sum(m["type"] == "knowledge-update" for m in meta)}))
+
+
+def load_questions() -> list[dict]:
+    return [json.loads(x) for x in (STATE / "questions.jsonl").read_text(encoding="utf-8").splitlines() if x.strip()]
+
+
+def bench_module():
+    sys.path.insert(0, str(REPO / "bench/real_questions"))
+    import run_real
+
+    return run_real, run_real.bench_from(REPO)
+
+
+def dense_module():
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("mh_dense_lme", REPO / "bench/memory_honesty/dense.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def sample_of(rows: list[dict], n: int) -> list[dict]:
+    """n answerable questions drawn with a fixed seed (the `_abs` ones are a development set)."""
+    pool = [r for r in rows if not r["abs"]]
+    return sorted(random.Random(SEED).sample(pool, n), key=lambda r: r["id"])
+
+
+def split_of(rows: list[dict]) -> dict[str, str]:
+    """Set 14: `abs` for the 30 unanswerable (a development set since set 7's amendment), and a seed-drawn half of the
+    470 answerable questions each for `dev` and `heldout`. Rules are chosen on `dev` only."""
+    ids = sorted(r["id"] for r in rows if not r["abs"])
+    dev = set(random.Random(SPLIT_SEED).sample(ids, len(ids) // 2))
+    return {r["id"]: "abs" if r["abs"] else ("dev" if r["id"] in dev else "heldout") for r in rows}
+
+
+def make_ablated(rows: list[dict]) -> list[dict]:
+    """Each answerable question's vault with every labelled answer session deleted: no page can answer it, so the
+    right behaviour is a refusal. Easier than the real `_abs` questions (whose topical sessions stay in the vault),
+    but labelled by the authors' own `answer_session_ids` and needs no model."""
+    split = split_of(rows)
+    base = STATE / "ablated"
+    out = []
+    for it in rows:
+        if it["abs"]:
+            continue
+        dst = base / it["id"]
+        if dst.exists():
+            shutil.rmtree(dst)
+        shutil.copytree(it["vault"], dst)
+        answer = set(it["answer_sessions"])
+        for rel, meta in it["pages"].items():
+            if meta["sid"] in answer:
+                (dst / rel).unlink(missing_ok=True)
+        out.append({"id": it["id"], "q": it["q"], "type": it["type"], "split": split[it["id"]], "vault": str(dst)})
+    return out
+
+
+def ablate(repo: Path) -> None:
+    """KRouter's own gate (in-process `recall`) on the ablated vaults; counts the refusals per half."""
+    import tempfile
+
+    sys.path.insert(0, str(repo / "skill/krouter/scripts"))
+    rows = make_ablated(load_questions())
+    out = []
+    with tempfile.TemporaryDirectory(prefix="krouter-ablate-") as tmp:
+        os.environ["KROUTER_CACHE_DIR"] = tmp
+        import recall_index as ri
+
+        for it in rows:
+            res = ri.recall(Path(it["vault"]), it["q"], limit=3)
+            refused = res["confidence"] == "none" or not res["hits"]
+            out.append({"id": it["id"], "split": it["split"], "refused": refused,
+                        "cited": [] if refused else [h["rel"] for h in res["hits"]]})
+            for f in Path(tmp).glob("recall-*"):
+                f.unlink(missing_ok=True)
+    (STATE / "ablated.krouter.jsonl").write_text("".join(json.dumps(o, ensure_ascii=False) + "\n" for o in out),
+                                                 encoding="utf-8")
+    by = {h: [o for o in out if o["split"] == h] for h in ("dev", "heldout")}
+    print(json.dumps({"ablated_refused": f"{sum(o['refused'] for o in out)}/{len(out)}",
+                      **{h: f"{sum(o['refused'] for o in v)}/{len(v)}" for h, v in by.items()}}))
+
+
+def run(system: str, limit: int, repo: Path, sample: int = 0, pages: int = 3) -> None:
+    rows = load_questions()[: limit or None]
+    if sample:
+        rows = sample_of(rows, sample)
+    run_real, bench = bench_module()
+    out = []
+    name = system
+    if system in DENSE_SYSTEMS or system == "krouter-inproc":
+        d = dense_module()
+        floors = d.session_floors() if system in DENSE_SYSTEMS else None
+        for it in rows:
+            q = [{"id": it["id"], "q": it["q"]}]
+            ans = (d.session_answers(system, Path(it["vault"]), q, floors) if floors else
+                   [{**a, "cited": [] if a["refused"] else a["cited"]} for a in d._krouter_raw(q, Path(it["vault"]))])[0]
+            out.append({"id": it["id"], "cited": ans["cited"][:3], "refused": ans["refused"]})
+        if floors:
+            name = f"{system}.{re.sub(r'[^a-z0-9]+', '-', d.MODEL.split('/')[-1].lower()).strip('-')}"
+    elif system == "krouter":
+        cache = STATE / "cache"
+        for it in rows:
+            ans = run_real.route_answers(repo, [{"id": it["id"], "q": it["q"]}], Path(it["vault"]), cache / it["id"],
+                                         pages=pages)[0]
+            out.append({"id": it["id"], "cited": ans["cited"], "refused": ans["refused"], "repo": str(repo)})
+            shutil.rmtree(cache / it["id"], ignore_errors=True)
+    else:
+        dev = bench.questions("dev3")
+        floor = bench.pick_floor(dev, bench.bm25_scored(dev, skip_superseded=True, vault_src=bench.vault_of("dev3"),
+                                                        cjk=True))
+        for it in rows:
+            scored = bench.bm25_scored([{"id": it["id"], "q": it["q"]}], skip_superseded=True,
+                                       vault_src=Path(it["vault"]), cjk=True)
+            ans = bench.floor_answers(scored, floor)[0]
+            out.append({"id": it["id"], "cited": ans["cited"][:3], "refused": ans["refused"]})
+    path = STATE / f"outputs.{name}{f'.s{sample}' if sample else ''}.jsonl"
+    path.write_text("".join(json.dumps(o, ensure_ascii=False) + "\n" for o in out), encoding="utf-8")
+    print(json.dumps({"system": name, "sample": sample, "questions": len(out), "refused": sum(o["refused"] for o in out)}))
+
+
+def judge(it: dict, ans: dict) -> dict:
+    """Per-question outcomes from the labels alone."""
+    cited = [it["pages"].get(rel, {}).get("sid") for rel in ans["cited"]]
+    answer = set(it["answer_sessions"])
+    days = {v["sid"]: v["day"] for v in it["pages"].values()}
+    latest = max(answer, key=lambda s: (days.get(s, ""), s)) if answer else None
+    hit = bool(answer & set(cited))
+    return {"answerable": not it["abs"], "ku": it["type"] == "knowledge-update" and not it["abs"],
+            "refused": ans["refused"], "evidence": hit, "latest": latest in cited,
+            "stale_only": hit and latest not in cited}
+
+
+METRICS = {
+    "evidence_cited": ("answerable", "evidence"),
+    "refused_answerable": ("answerable", "refused"),
+    "ku_latest_cited": ("ku", "latest"),
+    "ku_stale_only": ("ku", "stale_only"),
+    "abs_refused": ("abs", "refused"),
+}
+
+
+def rate(outcomes: list[dict], subset: str, field: str) -> tuple[int, int]:
+    pool = [o for o in outcomes if (not o["answerable"] if subset == "abs" else o[subset])]
+    return sum(o[field] for o in pool), len(pool)
+
+
+def score() -> None:
+    qs = {q["id"]: q for q in load_questions()}
+    systems = {}
+    for path in sorted(STATE.glob("outputs.*.jsonl")):
+        name = path.name[len("outputs."):-len(".jsonl")]
+        ans = {a["id"]: a for a in map(json.loads, path.read_text(encoding="utf-8").splitlines())}
+        systems[name] = {qid: judge(qs[qid], a) for qid, a in ans.items() if qid in qs}
+    report = {"questions": len(qs), "systems": {}}
+    for name, res in systems.items():
+        outs = list(res.values())
+        report["systems"][name] = {m: "{}/{}".format(*rate(outs, *spec)) for m, spec in METRICS.items()}
+    for name in systems:  # samples: each system against KRouter in-process on the same questions
+        if name.endswith(tuple(f".s{n}" for n in range(1, 10_000))) and not name.startswith("krouter-inproc"):
+            base = "krouter-inproc." + name.rsplit(".", 1)[1]
+            if base in systems:
+                common = sorted(systems[name].keys() & systems[base].keys())
+                rng = random.Random(SEED)
+                for m, (subset, field) in METRICS.items():
+                    d = [int(systems[name][i][field]) - int(systems[base][i][field]) for i in common
+                         if (not systems[base][i]["answerable"] if subset == "abs" else systems[base][i][subset])]
+                    if d:
+                        boots = sorted(sum(rng.choice(d) for _ in d) / len(d) for _ in range(RESAMPLES))
+                        report.setdefault("paired_vs_krouter", {}).setdefault(name, {})[m] = {
+                            "diff": round(sum(d) / len(d), 4), "n": len(d),
+                            "ci95": [round(boots[int(0.025 * RESAMPLES)], 4), round(boots[int(0.975 * RESAMPLES)], 4)]}
+    if {"krouter", "bm25-floor"} <= systems.keys():
+        common = sorted(systems["krouter"].keys() & systems["bm25-floor"].keys())
+        rng = random.Random(SEED)
+        diffs = {}
+        for m, (subset, field) in METRICS.items():
+            ids = [i for i in common if (not systems["krouter"][i]["answerable"] if subset == "abs"
+                                         else systems["krouter"][i][subset])]
+            if not ids:
+                continue
+            d = [int(systems["krouter"][i][field]) - int(systems["bm25-floor"][i][field]) for i in ids]
+            boots = sorted(sum(rng.choice(d) for _ in d) / len(d) for _ in range(RESAMPLES))
+            diffs[m] = {"krouter_minus_bm25": round(sum(d) / len(d), 4),
+                        "ci95": [round(boots[int(0.025 * RESAMPLES)], 4), round(boots[int(0.975 * RESAMPLES)], 4)],
+                        "n": len(ids)}
+        report["paired"] = diffs
+    report["scored_at"] = datetime.now().isoformat(timespec="seconds")
+    (STATE / "report.json").write_text(json.dumps(report, ensure_ascii=False, indent=1), encoding="utf-8")
+    print(json.dumps(report, ensure_ascii=False))
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    c = sub.add_parser("convert")
+    c.add_argument("--data", required=True)
+    r = sub.add_parser("run")
+    r.add_argument("--system", choices=["krouter", "bm25-floor", "krouter-inproc", *sorted(DENSE_SYSTEMS)], required=True)
+    r.add_argument("--sample", type=int, default=0, help="a seed-drawn sample of this many answerable questions")
+    r.add_argument("--pages", type=int, default=3, help="krouter: how many cited pages to keep (set 22: 5)")
+    r.add_argument("--limit", type=int, default=0)
+    r.add_argument("--repo", default=str(REPO), help="the KRouter checkout to run (e.g. a worktree at the release tag)")
+    sub.add_parser("score")
+    a = sub.add_parser("ablate")
+    a.add_argument("--repo", default=str(REPO))
+    args = ap.parse_args()
+    os.environ["KROUTER_NO_QUERY_LOG"] = "1"
+    STATE.mkdir(parents=True, exist_ok=True)
+    if args.cmd == "convert":
+        convert(Path(args.data))
+    elif args.cmd == "run":
+        run(args.system, args.limit, Path(args.repo), args.sample, args.pages)
+    elif args.cmd == "ablate":
+        ablate(Path(args.repo))
+    else:
+        score()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

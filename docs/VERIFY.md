@@ -1,0 +1,294 @@
+# What a stranger can verify
+
+<!-- krouter-status:start (source: docs/STATUS.md; run scripts/sync_status.py) -->
+> **Current status of `main` (latest release v2.1.2, 2026-11-13). Measured, and what is not.** One-line installs get
+> the latest release; anything under "Unreleased" in CHANGELOG.md is on `main` only. Every fact an evaluating agent
+> needs, with sources: [`docs/FOR-AGENTS.md`](https://github.com/398894496-arch/KRouter/blob/main/docs/FOR-AGENTS.md).
+> - **Held-out bench** (200 questions on a synthetic 110-page vault, never tuned on; *not* real traffic): KRouter 26%
+>   wrong citations, 47 of 80 unanswerable questions refused, 102 of 120 answerable right. At their defaults claude-mem
+>   64% and basic-memory 78%, 72 and 45 right; neither can refuse. BM25 given KRouter's two rules (skip replaced
+>   pages, refuse a weak match) is level with KRouter: the lead is those rules being on by default, not the ranker.
+> - **Answer accuracy** (LongMemEval S, the number other projects publish; measured on 1.3.0, which gave three pages):
+>   400 of 500 right, 80.0% [76.4, 83.4], with KRouter's top three pages as the only context; reader and judge Claude Sonnet 5.5 with the benchmark's own
+>   prompts, not the GPT-4o most projects use. Weakest on questions that add up several sessions (69 of 121).
+>   The same reader given plain BM25's top three sessions gets 405 right (81.0%): no difference shown (paired −1.0
+>   points [−2.8, +0.8]); given nothing it gets 0 of the 470 answerable. On this benchmark the lookup is level with
+>   BM25, not ahead. Given the benchmark's own answer sessions (perfect retrieval) the reader gets 492 (98.4%), so
+>   the missing 18 points [15.0, 21.8] are lost in retrieval, not by the reader. 2.0 gives five pages, two of them
+>   ones the vault connects to the hits: every answer session among them for 210 of 235 held-out questions (BM25's
+>   top five 198), multi-session 40 of 47 (31) ([set 18](https://github.com/398894496-arch/KRouter/blob/main/bench/memory_honesty/HELDOUT.md)).
+>   **Answer accuracy at 2.1.1's default pages** (about 5.6 a question; set 22, 2026-11-13, same reader and judge): **449 of
+>   500, 89.8% [87.2, 92.4]**, held-out half 201 of 235 (85.5%); multi-session 100 of 121 (69), temporal 111 of 127 (97). BM25
+>   was not rerun at the same page count; at it, BM25 hands over every answer session for 396 of 470, KRouter 417.
+> - **Someone else's benchmarks** (scored from the authors' labels, no model judge): LongMemEval S, an answer session
+>   cited for 439 of 470 answerable questions (1.x, three pages); 9 of 30 unanswerable refused by the gate (set 14; the
+>   "3 of 30" quoted before was 1.1.1; with a reader model on top, 29 of 30 are answered "not mentioned", but the same
+>   reader given nothing says so for all 30, so that layer is mostly the model's: [`NUMBERS.md`](https://github.com/398894496-arch/KRouter/blob/main/docs/NUMBERS.md)); LoCoMo, evidence first for 991 of 1,540,
+>   37 of 446 adversarial refused. Page found, not answer accuracy; plain BM25 finds about as many.
+> - **Real-traffic blind test on fresh queries** ([VERIFY.md](https://github.com/398894496-arch/KRouter/blob/main/docs/VERIFY.md)
+>   layer 4): not run yet; it waits for 50 new queries (30 logged by 2026-11-09).
+> - **Who wrote the held-out questions:** Claude Opus in separate claude.ai sessions, not a person. A person-written
+>   set is planned.
+> - **Lessons across tasks** (held-out; the host model judges from a digest of the cards): the right lesson offered on
+>   14 / 14 (Sonnet 5.5) and 11 / 14 (Haiku 5.5) Chinese tasks with a new subject, 14 / 14 and 13 / 14 in English,
+>   none of the 14 quiet tasks disturbed; cards the agent writes itself passed on set 23 (13 / 16, faithful 92%).
+> - **Releases:** 2.1.2 (2026-11-13): no engine change; the set 22 answer-accuracy run and its docs (449 of 500, held-out half 201 of 235).
+>   2.1.1 (2026-11-12): reference material is recognised on positive evidence (a source address, an
+>   author or byline; on one real vault the owner's pages taken for reference fell from 30 to 3 of 692, set 42), and
+>   experience cards and the hook's trigger phrases unused for 60 days step back (`hot_days`; rules are never weighed
+>   down). 2.1.0 (2026-11-11, the bullet after this one); 2.0.0 (2026-11-10): mention something and the agent recalls what was settled about it; lessons carry
+>   over between tasks and grow into skills; five pages with the ones the vault connects; a change of mind holds
+>   with no key; a lighter install that is English end to end; the router moved to `skill/krouter` (an older
+>   install's path is left as a link on upgrade). Minor releases at most once a week, patches when ready;
+>   `KROUTER_TAG` pins one.
+> - **New in 2.1.0 (2026-11-11):** a knowledge-base layer: folders declared in `krouter-kb.txt` (and clippings,
+>   as before) are reference material, listed apart under `knowledge_base:` and never setting the confidence; when only
+>   they match, the receipt starts `memory: none` (tests, and set 37's synthetic set). `krouter kb add / suggest /
+>   import` (PDF, Word, HTML with a converter already on the machine). A rule to refuse more near misses was studied
+>   on development data (set 37) and **not shipped**: none of 216 candidates refused 10 more within a 1-point loss
+>   (the best: 3), so the refusal numbers above are unchanged. Instead the receipt's first line says `memory: direct`,
+>   `related` (only related pages) or `none` (LongMemEval's 30: 0 / 21 / 9); an optional strict mode treats `related`
+>   as `none` and on session-only memories answers almost nothing (set 38). Also: the README's team section and two-layer refusal
+>   numbers, and a `recall_note:` naming question words the top page never uses (its effect **not measured**).
+> - **Team server** (self-hosted; no KRouter cloud): several isolated memories per server, a token each, Prometheus
+>   `/metrics`; Docker, Compose, Kubernetes and systemd files. Over HTTP on one M2 laptop: 10,000 pages 13 ms a lookup
+>   and 301 answers/s with 32 callers, 50,000 pages 54 ms and 75/s (synthetic vaults, `bench/scale/serve_load.py`).
+>   The Kubernetes manifest and systemd unit are checked by tests, not yet run on a cluster or host.
+> - **Install and capture:** the one-line install asks nothing, connects every app it finds (Claude Code with its
+>   plugin, Codex, Cursor, Claude Desktop, VS Code, Copilot CLI, Gemini CLI, Kiro, Zed, Cline CLI), lists every settings
+>   file it changed (a copy of each kept), and imports nothing from the past (`--all` imports the last 7 days, locally,
+>   no model call; `--minimal` is lookup only and connects only the apps you name). From then on, Claude Code, Codex and Cursor each
+>   record every turn as it ends through their session hooks (local, no model call; Codex runs them once you trust them
+>   in `/hooks`; Cursor's run in its agent CLI, where a typed correction is not noted). Distilling with a model and the nightly job
+>   ask first (`--ask`). The manual `install.sh` installs the job (`KROUTER_NO_TIMER=1` skips). Queries never leave the machine.
+> - **Nightly writer lanes:** an API key runs nothing locally; grok (kernel sandbox) and claude (tool allow-list) are
+>   limited to the vault; Codex can read the whole account and writes only the vault, so it is used only when you name
+>   it or set `KROUTER_ALLOW_CODEX=1`; other CLIs are unconfined and are never picked unless you set
+>   `KROUTER_ALLOW_UNCONFINED=1`.
+>   [SECURITY.md](https://github.com/398894496-arch/KRouter/blob/main/SECURITY.md) has the table.
+<!-- krouter-status:end -->
+
+Four layers. Do not merge them. They do not prove the same thing.
+
+| Layer | What it proves | Reproducible from this clone? |
+|---|---|---|
+| 1. Implementation | The lock does what [`ARCHITECTURE.md`](ARCHITECTURE.md) says | Yes — `clone_25` |
+| 2. Comparison | After the same metadata, the lock refuses where unthresholded lexical TF-IDF still cites | Yes — `lock_vs_neighbor` |
+| 3. Field self-report | Author’s filled vault, one window | **No.** Labeled. Use the checker on *your* vault. |
+| 4. Real traffic | On the questions agents actually sent, the router’s output got more useful, release by release | **No.** The queries name private projects. The method below runs on *your* logs. |
+
+This is **not** five fresh LLM sessions. 这不是五次新会话LLM盲测. The author’s 2026-08-21 rewrite set asked paraphrases a model had to compress into a noun. CI cannot be that model. `clone_25`’s 25/25 is not the same kind of evidence as that private 25/25.
+
+`template/` is a clean minimum sample. Names are short, topics barely collide. It is a **floor** (the mechanism is not buggy), not a **ceiling** (it does not show the dirty live vault). Real notes are messier.
+
+---
+
+## Layer 1 — implementation (clone_25)
+
+The map against [`template/`](../template/). Two different checks. Do not quote them as one score.
+
+### Exhaustive map check
+
+**25/25** topics, **39/39** aliases, **0** conflicts.
+
+This is an enumeration, not a sample. Every alias is looked up; every pair is checked for collision. There is no “N is small” caveat. It proves **this table is internally consistent**. It does not prove the ranker is clever.
+
+```bash
+python3 scripts/verify_canonical_map.py
+python3 tests/fixtures/clone_25/run.py
+python3 -m pytest -q tests/test_clone_25.py
+```
+
+### Invariant check (rewrite)
+
+Alias lock only: **25/25** whole-sentence paraphrases do not fire the lock; **25/25** listed short nouns hit the gold page. (A paraphrase that misses the lock goes on to ranked recall, measured in the layer 2 benches.)
+
+That is **implementation correctness**: whole-sentence rewrite does not fire AND matching; a protocol noun finds the gold page. Code does what the protocol wrote. No bug on this sample.
+
+It does **not** replace layer 2. Layer 2 asks whether that matching *choice* beats lexical cosine. Layer 1 asks whether the code implements the choice.
+
+Map and questions: [`tests/fixtures/clone_25/`](../tests/fixtures/clone_25/).
+
+### The checker vs the author’s 26/26 · 156/156
+
+`verify_canonical_map.py` lets **any host** check **their** map against **their** vault.
+
+```bash
+python3 scripts/verify_canonical_map.py \
+  --map /path/to/canonical_sources.psv \
+  --vault /path/to/YourVault
+```
+
+It does **not** verify the historical claim “the author’s live map was 26/26 · 156/156.” That map is not in this repository. Running the script on `template/` is not a replay of that number.
+
+### Recall bench (refuse instead of guess, below the lock)
+
+The checks above cover the lock. [`tests/fixtures/recall_bench.jsonl`](../tests/fixtures/recall_bench.jsonl) covers what answers a miss: 24 questions against `template/` — 12 with a gold page, 6 the vault cannot answer, and 6 half-off-topic ones that borrow one vault word (`咖啡机的定时器多久除垢一次` shares only `定时` with the timer page). Recall must refuse all 12 non-answerable ones and put the gold page first for at least 9 of 12 English and 9 of 12 Chinese questions (the same 12 asked in Chinese — a fresh vault is a small vault, and that is where a Chinese-speaking host starts). Gold page first, English / Chinese, and half-off-topic refused (same sample alias table): 0.9.3 9 / 9 / 3 of 6; 0.10.1 9 / 5 / 6 of 6; 0.10.2 9 / 9 / 6 of 6.
+
+```bash
+python3 -m pytest -q tests/test_recall_bench.py
+```
+
+The Chinese template (`template-zh/`, what a Chinese-speaking host starts with) has its own bench, [`tests/fixtures/recall_bench_zh.jsonl`](../tests/fixtures/recall_bench_zh.jsonl): 12 gold-page questions, 6 off-topic, 6 half-off-topic. A fresh vault is a small vault, and small vaults are where corpus statistics stop telling a word from a fragment (`天会`) or saying that `房贷` / `报销` are absent for a reason; 0.11.0 decides that from a general two-character word list instead. 0.10.2: gold page 9/12, off-topic refused 5/6, half-off-topic refused 1/6. 0.11.0: 9/12, 6/6, 5/6 (CI: ≥ 9, all, ≥ 5). **With the alias table emptied the numbers are the same** — on this template recall needs no lock noun at all. The English template and the author vault are unchanged by the change.
+
+**Windows, on a real host** (Windows 11, PowerShell 5.1, Python 3.12, 2026-10-11): `bootstrap.py` made the Chinese vault, installed the skill, put the alias table in the vault and registered the scheduled task; `route_knowledge.py` locked a Chinese question and refused an off-topic one; a fake key pasted on the key page moved into the keys file and never printed; `nightly.py --dry-run` and a real run (no model → `skipped`, report written); `run.py --dry-run`; `install_windows_task.ps1 -Uninstall`. The one-line `bootstrap.ps1` itself fetches a release, so it is checked on the host after a release is published.
+
+### Platforms and real sessions (2.0.0 candidate, 2026-11-10)
+
+**Windows: not tested for 2.0.0.** The four Windows hosts in the maintainer's SSH configuration were tried once each
+with a short timeout and none answered (three: port 22 timed out; the fourth: the connection came up and the SSH
+banner never arrived). So `bootstrap.ps1`, the Windows install, the scheduled task and the move of the pre-2.0 folder on
+Windows have not run on a real machine since the 2026-10-11 check above. What is pinned instead is the logic, on any OS:
+`tests/test_bootstrap.py::test_windows_upgrade_keeps_the_table_and_falls_back_to_a_junction` runs `install_windows` on a
+pre-2.0 folder and checks that the alias table is carried over and that, when a symlink cannot be made, the old path
+becomes a directory junction (`cmd /c mklink /J`). A junction made by a real `mklink` is not checked.
+
+**Linux, in a container** (Docker 29 under Colima, Ubuntu 24.04 aarch64 host; image `python:3.12-slim`, Debian 13,
+Python 3.12.16, a fresh user, no systemd, no cron, no curl, no network for apt). Built with `scripts/release_pack.sh`;
+the release `bootstrap.sh` ran as the README says, with `KROUTER_RELEASE_BASE` pointing at the release files and a
+twenty-line `curl` stand-in for `file://` (the image has no curl): the checksum check, the unpack and the link are the
+real script. Steps and seconds: the pre-2.0 layout (an archive of `9d73bd5`) installed, 2 s; one-line upgrade to 2.0.0,
+1 s: `~/.agents/skills/krouter-obsidian` became a link to `~/.agents/skills/krouter`, the old Cursor rule was replaced, the
+alias table kept; the old path still resolves; `krouter doctor` OK, 1 s; a question the memory answers came back with its
+page, a question it cannot answer with `recall: none`, under 1 s each; `krouter mcp` listed its five tools; `--timer`:
+"HOST ACTION: no systemd user session and no crontab", nothing installed; uninstall removed the skill, the link and the
+recorded memory path and left the memory folder alone, 0 s; a cold install of 2.0.0 on a clean user, 2 s, then the same
+questions and uninstall. **One bug found and fixed:** after that `--timer`, the install's summary said `"timer": true`,
+the health page said the job was running and `krouter doctor` then failed with "no job is installed". The install now
+checks that a job exists after asking for one and says "The nightly job was NOT installed" otherwise
+(`test_timer_that_did_not_install_is_not_reported_as_installed`). Not run: a Linux machine with a systemd user session or
+a crontab (the `crontab` branch of the installer is unchanged and untested here), and any non-Debian distribution.
+
+**Real sessions: does the host do it by itself?** Sets 30 and 31 in
+[`HELDOUT.md`](../bench/memory_honesty/HELDOUT.md), code and records in [`bench/behavior/`](../bench/behavior/). Each
+scenario is a small project and one user message that never mentions memory, KRouter or lessons; the memory is a
+throwaway copy with 14 cards and 30 decision pages; KRouter is installed the way the README says. Codex CLI 0.155.0-alpha.9.2
+(model `gpt-5.6-terra`), 20 scenarios, once each:
+
+| | Should (of 4) | Should not |
+|---|---|---|
+| Mention the digest's lesson | 2 (C01, C09) | 0 of 12 |
+| Call `krouter_learn` after solving a problem | **0** | 0 of 12 |
+| Call `krouter_correct` when the user changes a decision | **0** | 0 of 16 |
+
+A Claude Code subagent (Sonnet 5.5, one fresh subagent per scenario), same 20: offer 2 of 4 (0 of 12), learn **0** of 4
+(0 of 12), correct 3 of 4 (0 of 16; the fourth wrote a note instead after its lookup found no page). **This host is an
+approximation:** a subagent cannot be given an MCP server, so the same tool descriptions, server instructions and
+SessionStart text were put in its context and the tools reached through a shell helper. It shows what the wording does
+to a Claude model, not what Claude Code does with the MCP server.
+
+*Why Codex never called the write tools:* in this Codex version the model is given the SessionStart text but no tool
+definition that mentions krouter and none of the server's instructions; asked to list its krouter tools it listed none, and
+the tools worked when it was told by name to call one. The only wording about `krouter_correct` and `krouter_learn` that reaches
+it is the descriptions it does not see. The digest (which it did use, twice) never names a tool. Change made after set 30:
+the SessionStart hook now ends with one line naming `krouter_ask`, `krouter_correct` and `krouter_learn` and when to call
+each, and the server's two instruction sentences say the same. Checked on a new development set of 12 (set 31, counts
+below): **Codex could not be rerun** (the account's usage limit was reached during the run: 11 of the 12 sessions failed
+before the model saw anything, so that run is void and the change is **not verified on Codex**); before the change, 12 of 12
+valid sessions gave offer 1 of 2, learn 0 of 3, correct 0 of 3, nothing where nothing was called for.
+Claude subagent, same set, old wording then new: offer 1 of 2 and 1 of 2; learn 1 of 3 then 2 of 3; correct 3 of 3 and
+3 of 3; should-not 0 in every cell. One scenario's difference is within what one run varies; this shows no harm and a possible
+gain, not a measured one. Cursor agent CLI (free account, model `auto`, the new wording, three scenarios): it
+looked the tool up itself and called `krouter_correct` on a decision change (1 of 1), did not call `krouter_learn` after fixing a
+Makefile (0 of 1), and made two lookups and no write on a plain feature request.
+
+**Limits.** The scenarios were written by the same model family that wrote the tool descriptions, with those descriptions
+in view; 4 scenarios per behaviour, so one session moves a cell by 25 points; the Claude host is not MCP; one Codex
+model; the Codex "after" is missing. On set 30 no host reaches the registered line for `learn` (3 of 4).
+
+---
+
+## Layer 2 — comparison (lock vs neighbor)
+
+Expired page vs refuse. Four claims. **N=36**. Protocol: [`LOCK_VS_NEIGHBOR.md`](LOCK_VS_NEIGHBOR.md).
+
+```bash
+python3 tests/fixtures/lock_vs_neighbor/run.py
+python3 -m pytest -q tests/test_lock_vs_neighbor.py
+```
+
+- **Claim A (closed):** expired pages vanish because `invalid_at` and the map were applied, not because a ranker is smarter. MiniLM naive old-page is 3/4; after the same filter it is 4/4.
+- **Claim B (lexical TF-IDF on that fixture):** after the same information, the lock refuses; unthresholded cosine still returns a page. Six CJK rewrites sit below the strongest OOD negative. A floor sweep, including leave-one-out, finds no operating point that matches the lock.
+- **Claim C (multilingual MiniLM on that fixture):** same floor sweep as Claim B. CJK inversion is gone. Failure is precision: unthresholded, `H15` 发版 already ranks the seal page, not deploy. A floor cannot repair that. Replay: `dense_vectors.json` (not a live encoder). Lightweight.
+- **Claim D (BGE-M3 on that fixture):** same floor sweep. Hit 16/16 including 发版. Floor 0.40: 16/16 hits and 12/12 OOD negatives (N01–N12) refuse; leftover is neighbor `B03`「生产事故」→ timer page — not one of those 12. Floor 0.45: false-neighbor 0, a true hit drops. No operating point is 16/16 + 12/12 OOD refuse + false-neighbor 0. Replay: `dense_m3_vectors.json`. Middleweight is the mainstream opponent. Heavyweight (hybrid + rerank) is out of scope.
+
+Gold: [`tests/fixtures/lock_vs_neighbor/`](../tests/fixtures/lock_vs_neighbor/). Here N *is* small; say so when you quote false-neighbor rates.
+
+`clone_25` and the lexical/TF-IDF rows replay with `python3` + `rg` from this clone. MiniLM and BGE-M3 rows replay frozen JSON (`dense_vectors.json`, `dense_m3_vectors.json`) plus a content fingerprint. That checks the recorded vectors, not a stranger re-downloading the encoder. Re-encode is optional (`encode_dense.py`); Hub snapshots are not in the clone.
+
+---
+
+## Layer 3 — field self-report (not in this clone)
+
+Measured 2026-08-21 on the author’s private vault. **This repository does not contain the materials to reproduce them.** Treat as a self-report, not a receipt.
+
+| Claim | Why it is not in this clone |
+|---|---|
+| LLM 25/25 (2026-08-21) | Questions name private projects. Scoring needed five new chat sessions. |
+| 26/26 topics, 156/156 aliases | The live map is private. The checker on *your* files is a different measurement. |
+| 72 consecutive sealed days | Needs that window’s `05 时间日志/`. Template ships one sample day. |
+| 30 real tasks | Task logs are private. |
+
+`verify_sealed_days.py` is the same trust model as `verify_canonical_map.py`: it measures **this vault**, it does **not** replay “the author sealed 72 days.”
+
+A day is sealed when `05 时间日志/YYYY-MM/DD｜*.md` exists, is not empty, and is not a `待总结` / `to-summarize` stub. Empty files are gaps. Same-day stub + body counts as sealed. Omit `--from-date` / `--through-date` and the window is the first and last day files found.
+
+```bash
+python3 scripts/verify_sealed_days.py
+python3 scripts/verify_sealed_days.py --vault /path/to/YourVault
+python3 scripts/verify_sealed_days.py \
+  --vault /path/to/YourVault \
+  --from-date 2026-06-10 \
+  --through-date 2026-08-20
+python3 -m pytest -q tests/test_sealed_days.py
+```
+
+Titles stay local. The report prints dates and gap kinds only.
+
+---
+
+## Layer 4 — real traffic, blind-judged (not in this clone)
+
+Layers 1–3 use questions someone wrote for a test. This layer uses the questions the author’s agents actually sent the router, which is what the router is for.
+
+**Method.** Every `route_knowledge.(sh|py) <route> "<query>"` call in 30 days of local Codex / Claude Code / Cursor transcripts, minus the evaluation session itself, de-duplicated by `(route, query)`: 92 queries (128 calls — half repeat an earlier question). Each query runs through two routers. The two outputs are shuffled into X / Y and an LLM judge (Claude Opus) scores each, in batches of 10, without knowing which is which: **0** useless or empty, **1** relevant but the agent still has to dig, **2** directly answers. Re-judging identical outputs moves the mean by about ±0.05 (the old router scored 0.62–0.75 across six runs), so differences under 0.1 are noise. The judge is a model, not a person; read the numbers as direction and size, not as a benchmark.
+
+**Results (author vault, 1,180 notes, 2026-10-10 / 11).**
+
+| Run | Old (mean / direct / useless) | New (mean / direct / useless) |
+|---|---|---|
+| ≤ 0.5.1 vs 0.9.0 — same run | 0.62 / 14 / 49 | **1.47 / 55 / 12** |
+| ≤ 0.5.1 vs 0.7.0 | 0.74 / 20 / 44 | 1.26 / 42 / 18 |
+| ≤ 0.5.1 vs 0.8.0 | 0.66 / 14 / 45 | 1.41 / 52 / 14 |
+| 0.8.0 vs 0.9.0 | 1.34 / 46 / 15 | 1.43 / 52 / 12 |
+
+What moved it, in order of effect: answering misses with ranked recall instead of a whole-sentence grep; widening single-page routes; topic dossiers for things that lived only in daily logs (one topic appeared in 44 logs and on zero pages); name and single-concept ranking. Answer cards do not show in the ablations below. Learned triggers alone stayed inside the noise in their first run — they pay off as questions repeat.
+
+**Held-out synthetic set** (30 questions written before tuning; 24 with a gold page, 6 with none):
+
+| | ≤ 0.5.1 | 0.6.0 | 0.9.0 |
+|---|---|---|---|
+| Gold page found (lock or recall) | 21% | 88% | 92% |
+| Gold page first | 0% | 75% | 75% |
+| Wrong lock | 0 / 30 | 0 / 30 | 0 / 30 |
+| Off-topic question answered | 0 / 6 | 0 / 6 | 0 / 6 |
+
+**Is this a held-out set? No.** The 92 queries are a development set: the remaining failures below were read one by one, and the nightly learning step reads the same query log. The held-out synthetic set above is held out, and on it 0.6.0 and 0.10.0 are flat (gold page found 88% → 88%, first 75% → 71% on the same day's vault; the 0.9.0 column was measured on an earlier state of the vault). So the gains from 0.7 on show on real traffic the author tuned against, not on questions nobody tuned against.
+
+**Ablations (0.10.0, same 92 queries, same judge).** Does the answer card earn its keep?
+
+| Removed | Without | With | Difference |
+|---|---|---|---|
+| the `answer (generated):` line only | 1.47 / 52 / 9 | 1.46 / 51 / 9 | −0.01 |
+| answer cards entirely (no card triggers, no answer line) | 1.47 / 52 / 9 | 1.49 / 54 / 9 | +0.02 |
+
+Both are inside the ±0.05 noise. On this traffic and this judge, answer cards do not measurably help: the page plus its `how` line already scores 2 where a card would. Two caveats: the judge (Claude Opus) is the model family that writes the cards, so a self-preference bias would have favoured them, not hidden them; and 92 queries cannot resolve an effect under ~0.1. Cards stay because they cost little at query time and are checked twice (below), but the 0.8 → 0.9 gain should be credited to the same release's title and single-concept ranking, not to cards.
+
+**Card checks against adversarial cards.** 160 cards built against the author vault — 40 each of: a question that borrows one page word to ask about something else, an answer swapped in from another question on the page, an answer with its meaning flipped (specifics kept), an answer copied from another page — plus all 447 real cards. Lexical checks alone keep 436/447 real cards and let 121/160 bad ones through (they catch only copied answers, 37/40). The second model pass in `answer_cards.py` passes 446/447 real cards (the one it fails is a truncated identifier the lexical check also fails) and catches 160/160 bad ones.
+
+**Fresh held-out traffic.** Not yet. No new router query from the author's agents has been logged since the 92 were frozen (2026-10-10) beyond four. The query log is now kept free of test and evaluation calls (0.10.0 found 514 of its 518 lines were the author's own evaluation runs and pytest fixtures; they were removed before the nightly learning could read them). The next layer-4 number will be a blind judge on at least 50 queries logged after the freeze, against the same two routers.
+
+**What is left.** Of the 12 queries still judged useless in the same-run comparison: four ask about something no page in the vault mentions and a fifth about something one page mentions in passing (refusing is the right answer, but the judge scores it 0); two are too vague without the conversation they came from (`下一步优化`); the other five are plain retrieval misses on things that are written down (`Codex AGENTS`, `runtime36 上传 实测 发版`). On the synthetic set the gold page is in the top 10 for 95% of questions, so most remaining gains come from what gets written down — but real traffic still shows a handful of ranking misses.
+
+To run this on your own vault, extract your agents’ router calls from your transcripts the same way and compare two router installs on them. The scripts that produced these numbers are evaluation helpers, not part of the product, and are not shipped.
+

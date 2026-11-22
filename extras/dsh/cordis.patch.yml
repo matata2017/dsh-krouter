@@ -1,0 +1,11 @@
+# Host-realm insert. Read-only KRouter tools.
+# Uninstalling this plugin must not delete the Obsidian vault.
+- insert:
+    - id: krouter
+      name: dsh-krouter
+      config:
+        vaultPath: 'D:/krouter-dsh/vault'
+        enableMcp: true
+        enableHooks: true
+        enableSubagentHooks: false
+        debug: true

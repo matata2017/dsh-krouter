@@ -1,0 +1,23 @@
+.DS_Store
+.env
+.env.*
+*.pem
+.obsidian/
+template/.obsidian/
+__pycache__/
+.pytest_cache/
+.venv/
+extras/host-daily-evolution/.runtime-prompt.md
+node_modules/
+
+# Local KRouter runtime data: never publish the user's vault or debug logs
+vault/
+vault-*/
+krouter-debug.log
+
+
+# Python package build output
+build/
+dist/
+*.egg-info/
+dist-release/
