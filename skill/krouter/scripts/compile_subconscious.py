@@ -475,7 +475,15 @@ def standing_index(vault: Path, today: date | None = None, lines: int = INDEX_LI
     tcmd = f"sh {shlex.quote(str(script))} topics '<{'组名' if lang == 'zh' else 'group'}>'"
     more_tpl = (INDEX_MORE_TOPICS if os.environ.get("KROUTER_TOPICS") == "1" else INDEX_MORE)[lang]
     tail = INDEX_TAIL[lang].format(cmd=cmd, vault=str(vault), more=more_tpl.format(n=more, tcmd=tcmd) if more else "")
-    return "\n".join([INDEX_HEAD[lang], *body, tail])
+    index = "\n".join([INDEX_HEAD[lang], *body, tail])
+    # 超限告警：索引被截断时，往 stderr 打一行，让 nightly 的报告和终端看得见。
+    # 截断本身不丢知识（溢出的主题降级成「只列名字」，再多的还有 more 那句），
+    # 但「有多少没挤进来」需要人知道，否则索引会悄悄变钝。
+    if more or len(body) > lines:
+        print(f"krouter index: {more} topic(s) beyond the {lines}-line / {chars}-char budget; "
+              f"index is {len(index)} chars. Consider merging or retiring entries.",
+              file=sys.stderr)
+    return index
 
 
 def est_tokens(text: str) -> int:

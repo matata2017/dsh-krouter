@@ -17,7 +17,7 @@ import re
 import sys
 import time
 from collections import Counter
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -82,6 +82,39 @@ def usage_counts(vault: Path, days: int) -> Counter:
             if top:
                 used[top] += 1
     return used
+
+
+REVIEW_AFTER_DAYS = 60   # 一张 provisional 的卡挂了这么久还没被采纳，就该有人看一眼
+
+
+def review_candidates(vault: Path, days: int = REVIEW_AFTER_DAYS) -> list[dict]:
+    """经验卡里该回头核查的几张：仍是 provisional、写下超过 `days` 天、一次都没被采纳。
+
+    这里只负责「摆出来」，不判断内容对不对——那要人或者模型去读页面。挑这三条是因为
+    它们合起来意味着「写了很久、从没用上」，要么写偏了，要么没人知道它存在。
+    """
+    try:
+        import experience
+        import recall_index as ri
+    except Exception:  # noqa: BLE001  核查清单出错不该拖垮整个体检
+        return []
+    cutoff = date.today() - timedelta(days=days)
+    out = []
+    for card in experience.load_cards(vault):
+        if (card.get("status") or "").lower() != "provisional":
+            continue
+        if card.get("adopted_at"):
+            continue
+        try:
+            written = date.fromisoformat((card.get("date") or "")[:10])
+        except ValueError:
+            continue
+        if written > cutoff:
+            continue
+        out.append({"rel": card["rel"], "id": card.get("id", ""), "title": card.get("title", ""),
+                    "date": card.get("date", ""), "age_days": (date.today() - written).days})
+    out.sort(key=lambda c: c["age_days"], reverse=True)
+    return out
 
 
 def main() -> int:
@@ -161,6 +194,11 @@ def main() -> int:
     rules = sorted(r for r, t in tier.items() if t == "rule")
     unused = [r for r in rules if used.get(r, 0) == 0]
 
+    # 5. 该核查的经验卡：仍是 provisional、写下超过 REVIEW_AFTER_DAYS 天、且一次都没被采纳。
+    #    这不是「核实内容对不对」（那需要人或者模型去读），只是把该看哪几张摆出来——
+    #    否则 provisional 的卡会一直挂着，没人回头。
+    review_due = review_candidates(vault, days=REVIEW_AFTER_DAYS)
+
     report = {
         "generated_at": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
         "stale_locks": stale_locks,
@@ -176,6 +214,7 @@ def main() -> int:
         "unchecked_cards": unchecked_cards,
         "unverified_cards": unverified_cards,
         "broad_cards": broad_cards,
+        "review_due": review_due,
         "window_days": args.days,
     }
     if args.json:
@@ -206,6 +245,10 @@ def main() -> int:
         f"- 其中答案也没有可核对的数字/路径/英文词（只能人看）：{len(unchecked_cards)} 张",
         f"- 问题过宽（实词不到 2 个，可能把无关提问召回到这一页）：{len(broad_cards)} 张",
         *[f"  - `{r}`：{q}" for r, q in broad_cards[:30]], "",
+        f"## 该回头核查的经验卡（{len(review_due)} 张）", "",
+        f"仍是 provisional、写下超过 {REVIEW_AFTER_DAYS} 天、一次都没被采纳。"
+        "这里只把该看哪几张摆出来，不判断内容对不对——读一遍，对就标 confirmed，不对就改或删。", "",
+        *([f"- `{c['rel']}`（{c['age_days']} 天，{c['id']}）：{c['title']}" for c in review_due] or ["- 无"]), "",
         f"## 近 {args.days} 天没人读、也没被召回的规则页（{len(unused)}/{len(rules)}）", "",
         "规则页只是提醒，不降权、不删除（知识不因为旧就降权）；确认没用了再标 superseded / retired。"
         "降权只对经验卡和每句话钩子的触发词：hot_days 天没被用到就排到同类后面（`krouter-settings.psv` 的 `hot_days`，见夜间维护页）。", "",

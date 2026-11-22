@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { spawn } from 'node:child_process'
+import { execFileSync, spawn, spawnSync } from 'node:child_process'
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -105,4 +105,88 @@ test('KRouter MCP server exposes five tools', async () => {
     'krouter_note',
     'krouter_status',
   ])
+})
+
+test('KRouter learn() writes a card with a modified timestamp', () => {
+  // Goes through learn(), not write_card(), so the whole write path is exercised
+  // (the earlier version called write_card directly and would not catch a missing
+  // datetime import on the caller's side).
+  const script = `
+import sys, tempfile, shutil
+sys.path.insert(0, 'skill/krouter/scripts')
+from pathlib import Path
+import experience
+tmp = Path(tempfile.mkdtemp())
+try:
+    (tmp / '90 系统文件').mkdir(parents=True)
+    path, why = experience.learn(tmp, {
+        'situation': 'a', 'action': 'b', 'result': 'c',
+        'subject': ['probe'],
+        'lesson': 'when the same thing happens, do this',
+        'title': 'a card'}, 'src')
+    assert path is not None, why
+    print(path.read_text(encoding='utf-8'))
+finally:
+    shutil.rmtree(tmp, ignore_errors=True)
+`
+  const out = execFileSync('python', ['-c', script], {
+    cwd: 'D:/krouter-dsh', encoding: 'utf8',
+    env: { ...process.env, PYTHONIOENCODING: 'utf-8' },
+  })
+  assert.match(out, /^modified: \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$/m,
+    'card frontmatter carries an ISO 8601 modified timestamp')
+})
+
+test('KRouter index warns when topics fall outside the budget', () => {
+  const script = `
+import sys
+sys.path.insert(0, 'skill/krouter/scripts')
+import compile_subconscious as cs
+from pathlib import Path
+cs.standing_index(Path('D:/krouter-dsh/vault'), chars=5)
+`
+  const result = spawnSync('python', ['-c', script], {
+    cwd: 'D:/krouter-dsh', encoding: 'utf8',
+    env: {
+      ...process.env,
+      PYTHONIOENCODING: 'utf-8',
+      KROUTER_MAP: 'D:/krouter-dsh/vault/90 系统文件/canonical_sources.psv',
+    },
+  })
+  assert.match(result.stderr, /topic\(s\) beyond the \d+-line/, 'overflow is reported on stderr')
+})
+
+test('KRouter checkup lists old provisional cards for review', () => {
+  const script = `
+import sys, tempfile, shutil
+sys.path.insert(0, 'skill/krouter/scripts')
+from pathlib import Path
+import checkup
+tmp = Path(tempfile.mkdtemp())
+try:
+    d = tmp / '02 经验与方法' / '经验卡'
+    d.mkdir(parents=True)
+    (d / 'old.md').write_text('''---
+title: "经验｜旧卡"
+type: experience-card
+status: provisional
+date: 2026-01-01
+source: krouter-learn
+---
+
+- 处境：a
+- 做法：b
+- 结果：c
+- 通用说法：同类情况发生时按这个做
+''', encoding='utf-8')
+    due = checkup.review_candidates(tmp)
+    print(len(due), due[0]['age_days'] > 60 if due else False)
+finally:
+    shutil.rmtree(tmp, ignore_errors=True)
+`
+  const out = execFileSync('python', ['-c', script], {
+    cwd: 'D:/krouter-dsh', encoding: 'utf8',
+    env: { ...process.env, PYTHONIOENCODING: 'utf-8' },
+  }).trim()
+  assert.equal(out, '1 True', 'an old provisional card is offered for review')
 })

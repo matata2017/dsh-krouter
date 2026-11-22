@@ -612,10 +612,15 @@ def file_name(title: str) -> str:
     return f"经验｜{safe}.md" if ri.CJK_RE.search(safe) else f"Lesson - {safe}.md"
 
 
-def page_text(card: dict, source: str, day: str, writer: str = "krouter-capture") -> str:
+def page_text(card: dict, source: str, day: str, writer: str = "krouter-capture",
+              modified: str = "") -> str:
     when = "; ".join(card["when"])
     zh = bool(ri.CJK_RE.search(card["lesson"] + card["title"]))
     fm_when = f"when: {when}\n" if when else ""
+    # `modified` is when this page was last written, as an ISO 8601 timestamp. It
+    # answers "how current is this" both to a person and to the agent reading it
+    # back, which a creation-only `date` cannot.
+    fm_modified = f"modified: {modified}\n" if modified else ""
     title = f"经验｜{card['title']}" if zh else f"Lesson: {card['title']}"
     head = ("---\n"
             f"title: \"{title}\"\n"
@@ -624,6 +629,7 @@ def page_text(card: dict, source: str, day: str, writer: str = "krouter-capture"
             f"{fm_when}"
             f"source_ref: \"{source}\"\n"
             f"date: {day}\n"
+            f"{fm_modified}"
             f"source: {writer}\n"
             "---\n\n"
             f"# {title}\n\n")
@@ -655,6 +661,8 @@ def lexical_twin(vault: Path, lesson: str) -> dict | None:
 
 def write_card(vault: Path, card: dict, source: str, day: str, writer: str = "krouter-capture") -> Path | None:
     """Write one checked card; None when a card with the same lesson is already there (recorded as seen again)."""
+    from datetime import datetime
+
     twin = lexical_twin(vault, card["lesson"])
     if twin:
         record_again(vault, twin["id"], source, "同一条经验（字面检查）")
@@ -664,7 +672,8 @@ def write_card(vault: Path, card: dict, source: str, day: str, writer: str = "kr
     path = folder / file_name(card["title"])
     if path.exists():
         path = path.with_name(path.stem + "-" + hashlib.sha1(card["lesson"].encode()).hexdigest()[:6] + ".md")
-    path.write_text(page_text(card, source, day, writer), encoding="utf-8")
+    path.write_text(page_text(card, source, day, writer,
+                              modified=datetime.now().isoformat(timespec="seconds")), encoding="utf-8")
     return path
 
 
