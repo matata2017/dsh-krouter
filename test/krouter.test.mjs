@@ -103,6 +103,7 @@ test('KRouter MCP server exposes five tools', async () => {
     'krouter_correct',
     'krouter_learn',
     'krouter_note',
+    'krouter_skill',
     'krouter_status',
   ])
 })
@@ -268,4 +269,68 @@ finally:
     env: { ...process.env, PYTHONIOENCODING: 'utf-8' },
   }).trim()
   assert.equal(out, 'ok')
+})
+
+test('KRouter auto-promotes a candidate when a later turn adopts it', () => {
+  // Goes through record_uses/uses_in with the real ADOPT regex, so the headline
+  // promise ("adopted once → active") is exercised end to end, not just promote().
+  const script = `
+import sys, tempfile, shutil
+sys.path.insert(0, 'skill/krouter/scripts')
+from pathlib import Path
+import experience
+tmp = Path(tempfile.mkdtemp())
+try:
+    (tmp / '90 系统文件').mkdir(parents=True)
+    p, why = experience.learn(tmp, {'situation': 'a', 'action': 'b', 'result': 'c',
+        'subject': ['probe'], 'lesson': 'when the same thing happens, do this', 'title': 'a card'}, 'src')
+    assert p is not None, why
+    cid = experience.load_cards(tmp)[0]['id']
+    assert experience.load_cards(tmp)[0]['status'] == 'candidate'
+    # 第一轮回复引用了这张卡；下一句说"管用" —— uses_in 靠这个判据记 adopted
+    turns = [
+        {'ask': 'what should I do?', 'answer': f'试试这条〔{cid}〕', 'ts': '2026-11-22T10:00:00'},
+        {'ask': '管用，问题解决了', 'answer': 'ok', 'ts': '2026-11-22T10:01:00'},
+    ]
+    n = experience.record_uses(tmp, 'sess-1', turns)
+    u = experience.usage(tmp).get(cid, {})
+    status = experience.load_cards(tmp)[0]['status']
+    print(n, u.get('adopted', 0), status)
+finally:
+    shutil.rmtree(tmp, ignore_errors=True)
+`
+  const out = execFileSync('python', ['-c', script], {
+    cwd: 'D:/krouter-dsh', encoding: 'utf8',
+    env: { ...process.env, PYTHONIOENCODING: 'utf-8' },
+  }).trim()
+  const [events, adopted, status] = out.split(' ')
+  assert.ok(Number(events) > 0, 'use events were recorded')
+  assert.equal(adopted, '1', 'the adoption was detected by the ADOPT regex')
+  assert.equal(status, 'active', 'the candidate was promoted to active')
+})
+
+test('KRouter record_adopted promotes directly without a fake turn', () => {
+  const script = `
+import sys, tempfile, shutil
+sys.path.insert(0, 'skill/krouter/scripts')
+from pathlib import Path
+import experience
+tmp = Path(tempfile.mkdtemp())
+try:
+    (tmp / '90 系统文件').mkdir(parents=True)
+    p, why = experience.learn(tmp, {'situation': 'a', 'action': 'b', 'result': 'c',
+        'subject': ['probe'], 'lesson': 'when the same thing happens, do this', 'title': 'a card'}, 'src')
+    assert p is not None, why
+    cid = experience.load_cards(tmp)[0]['id']
+    experience.record_adopted(tmp, cid, 'manual')
+    u = experience.usage(tmp).get(cid, {})
+    print(u.get('adopted', 0), experience.load_cards(tmp)[0]['status'])
+finally:
+    shutil.rmtree(tmp, ignore_errors=True)
+`
+  const out = execFileSync('python', ['-c', script], {
+    cwd: 'D:/krouter-dsh', encoding: 'utf8',
+    env: { ...process.env, PYTHONIOENCODING: 'utf-8' },
+  }).trim()
+  assert.equal(out, '1 active', 'a direct adoption records adopted and promotes')
 })

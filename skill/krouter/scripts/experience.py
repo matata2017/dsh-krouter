@@ -708,10 +708,23 @@ def promote(vault: Path, card_id: str, to: str = ACTIVE) -> tuple[bool, str]:
     return False, f"{card_id}: no such card"
 
 
-def adopt_and_promote(vault: Path, card_id: str, source: str = "") -> tuple[bool, str]:
-    """Record one adoption and promote a candidate to active in the same step."""
-    record_uses(vault, source or "manual", [{"ask": "", "answer": f"〔{card_id}〕", "ts": ""}])
-    return promote(vault, card_id, ACTIVE)
+def record_adopted(vault: Path, card_id: str, source: str, why: str = "手动确认采纳") -> None:
+    """Record one `adopted` event for `card_id` and promote it if it is still a candidate.
+
+    The bulk path is `record_uses`, which infers adoption from a following turn that says the lesson was followed.
+    This is the direct path for a caller that already knows the card was adopted.
+    """
+    path = zones.path(vault, USES)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    row = {"at": date.today().isoformat(), "card": card_id, "kind": "adopted", "session": source, "turn": "",
+           "why": why}
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+    if PROMOTE_ON_ADOPT:
+        for card in load_cards(vault):
+            if card["id"] == card_id and card.get("status") == CANDIDATE:
+                promote(vault, card_id, ACTIVE)
+                break
 
 
 def record_again(vault: Path, card_id: str, source: str, why: str) -> None:
@@ -806,7 +819,7 @@ def extract(e: dict, excerpt: str, vault: Path, source: str, dry: bool = False) 
     for item in _json_array(redact(text))[:2]:
         ok = isinstance(item, dict) and not names_subject(item) and not unsupported_figures(item, excerpt)
         card = valid(item, excerpt) if ok else None  # 模型通道手里有摘录：卡里的数字摘录里没有就不要
-        path = write_card(vault, card, source, day) if card else None
+        path = write_card(vault, card, source, day, authority="inferred", status=CANDIDATE) if card else None
         if path:
             written.append(path)
     return written, len(prompt)
