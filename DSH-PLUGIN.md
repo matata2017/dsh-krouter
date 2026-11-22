@@ -155,3 +155,10 @@ real DSH event injection has not been observed yet.
 KRouter's MCP server is Python stdlib only. `PYTHONIOENCODING=utf-8` is set for
 all Python route, hook and MCP spawns so Chinese paths do not mojibake on
 Windows.
+
+## Further reading
+
+- [`docs/CLAUDE-MEMORY-CONFORMANCE.md`](docs/CLAUDE-MEMORY-CONFORMANCE.md) — how this memory
+  layer compares to Claude Code's, one dimension at a time.
+- [`scripts/conformance.py`](scripts/conformance.py) — the read-only script behind that
+  comparison; run it rather than trusting the table.
