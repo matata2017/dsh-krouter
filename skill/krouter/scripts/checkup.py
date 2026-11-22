@@ -95,8 +95,8 @@ def review_candidates(vault: Path, days: int = REVIEW_AFTER_DAYS) -> list[dict]:
     """
     try:
         import experience
-        import recall_index as ri
-    except Exception:  # noqa: BLE001  核查清单出错不该拖垮整个体检
+    except ImportError as exc:  # 只有缺模块才退化成空清单
+        print(f"checkup: review_candidates skipped ({exc})", file=sys.stderr)
         return []
     cutoff = date.today() - timedelta(days=days)
     out = []
