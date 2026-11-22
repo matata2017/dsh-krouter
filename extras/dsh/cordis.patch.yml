@@ -8,4 +8,18 @@
         enableMcp: true
         enableHooks: true
         enableSubagentHooks: false
+        enableKeyTools: true
+        autoCapture: true
+        # Run nightly upkeep (import → compile subconscious → skills → backup) every N hours; 0 disables it.
+        nightlyEveryHours: 24
+        # Follow the agent's current model: read provider/model from model/selection and
+        # reuse that provider's apiKeyEnv + baseURL from this profile's patch. The key
+        # value is resolved through ctx.credentials and never written anywhere.
+        followAgentModel: true
+        # Optional fixed fallback; used only when followAgentModel is false or no
+        # selection was seen yet.
+        modelChannel:
+          apiKeyEnv: ''
+          baseURL: ''
+          model: ''
         debug: true

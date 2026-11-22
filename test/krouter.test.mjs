@@ -1,7 +1,11 @@
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { test } from 'node:test'
 import { KROUTER_TOOL_NAMES, registerKrouterTools } from '../extras/dsh/lib/register.js'
+import { TurnRecorder, clearKey, keyStatus, setKey } from '../extras/dsh/lib/memory.js'
 
 const VAULT = 'D:/krouter-dsh/vault'
 const ROUTER = 'D:/krouter-dsh/skill/krouter/scripts/route_knowledge.py'
@@ -21,6 +25,53 @@ test('KRouter native DSH tools are registered and search the template vault', as
   assert.equal(result.canonical_match, 'true')
   assert.equal(result.canonical_id, 'Q01')
   assert.match(result.text, /Agent第二大脑\.md/)
+})
+
+test('KRouter key file set/status/clear never echoes the value', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'krouter-keys-'))
+  const previous = process.env.KROUTER_KEYS_ENV
+  process.env.KROUTER_KEYS_ENV = join(dir, 'keys.env')
+  try {
+    assert.deepEqual(keyStatus().present, [])
+    assert.deepEqual(setKey('DEEPSEEK_API_KEY', 'sk-test-value-123').present, ['DEEPSEEK_API_KEY'])
+    assert.deepEqual(keyStatus().present, ['DEEPSEEK_API_KEY'])
+    assert.deepEqual(clearKey('DEEPSEEK_API_KEY').present, [])
+    assert.throws(() => setKey('NOT_A_PROVIDER', 'sk-test'), /unsupported key name/)
+    assert.throws(() => setKey('DEEPSEEK_API_KEY', 'YOUR_DEEPSEEK_API_KEY'), /placeholder/)
+  } finally {
+    if (previous === undefined) delete process.env.KROUTER_KEYS_ENV
+    else process.env.KROUTER_KEYS_ENV = previous
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('KRouter turn recorder writes one excerpt page per session and day', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'krouter-excerpt-'))
+  try {
+    const recorder = new TurnRecorder(dir, {}, () => {})
+    recorder.noteUser('session-abcd1234', 'how do I do X?')
+    recorder.noteAssistant('session-abcd1234', 'do Y then Z')
+    const file = recorder.flush('session-abcd1234')
+    assert.ok(file, 'flush should return the written page')
+    assert.equal(recorder.flush('session-abcd1234'), null, 'a second flush without new turns writes nothing')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('KRouter excerpt records the project, matching Claude Code per-project memory', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'krouter-project-'))
+  try {
+    const recorder = new TurnRecorder(dir, {}, () => {})
+    recorder.noteUser('session-abcd1234', 'question', 'D:\\advisor')
+    recorder.noteAssistant('session-abcd1234', 'answer')
+    const file = recorder.flush('session-abcd1234')
+    const head = readFileSync(file, 'utf8').split('---')[1]
+    assert.match(head, /^project: advisor$/m, 'project name is recorded')
+    assert.match(head, /^project_root: D:\/advisor$/m, 'project root is recorded')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
 })
 
 test('KRouter MCP server exposes five tools', async () => {

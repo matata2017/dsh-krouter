@@ -7,9 +7,10 @@ import { defineTool } from "@deepseek-ai/dsh-tools";
 import z from "@deepseek-ai/schemastery";
 import { registerKrouterTools } from "./register.js";
 import { parseReceipt, runRoute } from "./route.js";
+import { KEY_NAMES, TurnRecorder, clearKey, keyStatus, readProviderChannel, resolveModelEnv, runNightly, setKey } from "./memory.js";
 
 export const name = "dsh-krouter";
-export const inject = ["tools", "agents"];
+export const inject = ["tools", "agents", "timer", "credentials"];
 
 const HERE = fileURLToPath(new URL(".", import.meta.url));
 const REPO_ROOT = fileURLToPath(new URL("../../../", import.meta.url));
@@ -98,6 +99,7 @@ function eventText(event) {
 
 function mountHooks(ctx, config) {
   if (config?.enableHooks === false) return;
+  const recorder = new TurnRecorder(vaultOf(config), config, message => debug(config, message));
   const attach = agent => {
     if (agent?.ctx === undefined) return;
     if (agent?.session?.header?.origin === "subagent" && config?.enableSubagentHooks !== true) return;
@@ -118,9 +120,21 @@ function mountHooks(ctx, config) {
     }
     ctx.effect(() => agent.ctx.on("session/event", (session, event) => {
       try {
-        if (event?.type !== "user/message" || session?.id !== sessionId) return;
+        if (session?.id !== sessionId) return;
+        debug(config, `event type=${event?.type} agent=${sessionId}`);
+        if (event?.type === "turn/end") {
+          const file = recorder.flush(sessionId);
+          debug(config, `turn/end flush=${file ? "written" : "empty"} agent=${sessionId}`);
+          return;
+        }
+        if (event?.type === "assistant/message") {
+          recorder.noteAssistant(sessionId, eventText(event));
+          return;
+        }
+        if (event?.type !== "user/message") return;
         if (event?.data?.source?.kind === "krouter-hook") return;
         const prompt = eventText(event);
+        recorder.noteUser(sessionId, prompt, cwd);
         debug(config, `session event type=${event?.type} agent=${sessionId} promptLen=${prompt.length}`);
         if (!prompt.trim()) return;
         let text = "";
@@ -165,6 +179,166 @@ function mountHooks(ctx, config) {
   };
   for (const agent of ctx.agents?.list?.() ?? []) attach(agent);
   ctx.effect(() => ctx.on("agent/created", ({ agent }) => attach(agent)), "krouter agent hook wiring");
+  mountNightly(ctx, config);
+}
+
+function mountNightly(ctx, config) {
+  const hours = Number(config?.nightlyEveryHours ?? 0);
+  if (!Number.isFinite(hours) || hours <= 0) return;
+  const vault = vaultOf(config);
+  if (!vault) return;
+
+  // Follow the agent's current model. `request/header` carries the exact
+  // provider/model of the next request and fires far more often than
+  // `model/selection` (which only records a change).
+  const follow = config?.followAgentModel !== false;
+  const live = { provider: "", model: "" };
+  let sawHeader = false;
+  const recordSelection = event => {
+    if (!follow) return;
+    const data = event?.data || {};
+    let provider = "";
+    let model = "";
+    if (event?.type === "request/header") {
+      const callConfig = data.header?.config;
+      provider = String(callConfig?.provider || "");
+      model = String(callConfig?.model || "");
+      sawHeader = true;
+    } else if (event?.type === "model/selection") {
+      provider = String(data.provider || "");
+      model = String(data.model || "");
+    } else {
+      return;
+    }
+    const changed = (provider && provider !== live.provider) || (model && model !== live.model);
+    if (provider) live.provider = provider;
+    if (model) live.model = model;
+    if (changed) debug(config, `model followed provider=${live.provider} model=${live.model}`);
+  };
+  if (follow) {
+    for (const agent of ctx.agents?.list?.() ?? []) {
+      ctx.effect(() => agent.ctx.on("session/event", (session, event) => recordSelection(event)), "krouter model follow");
+    }
+    ctx.effect(() => ctx.on("agent/created", ({ agent }) => {
+      ctx.effect(() => agent.ctx.on("session/event", (session, event) => recordSelection(event)), "krouter model follow");
+    }), "krouter model follow wiring");
+  }
+
+  const channelFor = async () => {
+    const explicit = config?.modelChannel || {};
+    if (explicit.apiKeyEnv) return explicit;
+    if (!follow) return undefined;
+    if (!live.provider) {
+      debug(config, "model follow: no request/header seen yet, so no model channel");
+      return undefined;
+    }
+    const provider = live.provider;
+    const model = live.model;
+    const patchPath = join(ctx.profileContext?.dir || "", "cordis.patch.yml");
+    const found = await readProviderChannel(patchPath, provider);
+    if (!found?.apiKeyEnv) {
+      debug(config, `model follow: provider=${provider} has no apiKeyEnv in ${patchPath}`);
+      return undefined;
+    }
+    if (found.api && found.api !== "openai-completions") {
+      debug(config, `model follow: provider=${provider} api=${found.api} is not openai-completions; KRouter needs an OpenAI-style endpoint`);
+      return undefined;
+    }
+    return { ...found, model };
+  };
+
+  const run = () => {
+    channelFor().then(channel => {
+      const env = channel?.apiKeyEnv ? resolveModelEnv(ctx.credentials, channel) : Promise.resolve({});
+      return env.then(extraEnv => {
+        debug(config, `nightly model env keys=${Object.keys(extraEnv).join(",") || "none"}`);
+        const result = runNightly(config, REPO_ROOT, vault, pythonOf(config), message => debug(config, message), extraEnv);
+        debug(config, `nightly done ok=${result.ok}`);
+      });
+    }).catch(error => {
+      debug(config, `nightly failed: ${error instanceof Error ? error.message : String(error)}`);
+    });
+  };
+  ctx.effect(() => ctx.interval(run, hours * 3600_000), "krouter nightly");
+
+  // The first run waits for a request/header so it does not silently skip the
+  // model steps right after a plugin reload; if none arrives within 30 minutes,
+  // run anyway (the model-dependent steps then skip, as designed).
+  const FIRST_DELAY = 60_000;
+  const FIRST_MAX_WAIT = 30 * 60_000;
+  const startedAt = Date.now();
+  const tryFirst = () => {
+    if (follow && !sawHeader && Date.now() - startedAt < FIRST_MAX_WAIT) {
+      setTimeout(tryFirst, 30_000);
+      return;
+    }
+    debug(config, `nightly first run (header seen=${sawHeader})`);
+    run();
+  };
+  setTimeout(tryFirst, FIRST_DELAY);
+  debug(config, `nightly scheduled every ${hours}h follow=${follow}`);
+}
+
+function mountKeys(ctx, config) {
+  if (config?.enableKeyTools === false) return;
+  const tool = {
+    name: "krouter_keys",
+    description:
+      "Inspect, set or clear the model API key KRouter's nightly distillation uses. Values go to the 0600 keys file (~/.dsh-krouter-keys.env), never into the DSH profile patch or the vault. Actions: status, set, clear.",
+    parameters: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        action: { type: "string", enum: ["status", "set", "clear"] },
+        name: { type: "string", description: `Provider key name, one of: ${KEY_NAMES.join(", ")}` },
+        value: { type: "string", description: "Key value for action=set. Never echoed back." },
+      },
+      required: ["action"],
+    },
+    output: {
+      schema: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          ok: { type: "boolean" },
+          text: { type: "string" },
+        },
+        required: ["ok", "text"],
+      },
+      render: (_args, value) => [{ type: "text", text: value.text }],
+    },
+    async execute(input) {
+      try {
+        if (input.action === "status") {
+          const status = keyStatus();
+          return {
+            ok: true,
+            text: [
+              `keys file: ${status.path}`,
+              status.present.length > 0 ? `configured: ${status.present.join(", ")}` : "configured: none",
+            ].join("\n"),
+          };
+        }
+        if (input.action === "set") {
+          if (!input.name || !input.value) throw new Error("set requires name and value");
+          const status = setKey(String(input.name), String(input.value));
+          debug(config, `key set name=${input.name}`);
+          return { ok: true, text: `saved ${input.name} to ${status.path}\nconfigured: ${status.present.join(", ") || "none"}` };
+        }
+        if (input.action === "clear") {
+          if (!input.name) throw new Error("clear requires name");
+          const status = clearKey(String(input.name));
+          debug(config, `key cleared name=${input.name}`);
+          return { ok: true, text: `removed ${input.name}\nconfigured: ${status.present.join(", ") || "none"}` };
+        }
+        throw new Error(`unknown action: ${input.action}`);
+      } catch (error) {
+        return { ok: false, text: `krouter_keys error: ${error instanceof Error ? error.message : String(error)}` };
+      }
+    },
+  };
+  ctx.effect(() => ctx.tools.register(tool), "krouter keys tool");
+  debug(config, "krouter_keys tool registered");
 }
 
 
@@ -223,6 +397,17 @@ export const Config = z.object({
   enableMcp: z.boolean().default(true),
   enableHooks: z.boolean().default(true),
   enableSubagentHooks: z.boolean().default(false),
+  enableKeyTools: z.boolean().default(true),
+  autoCapture: z.boolean().default(true),
+  nightlyEveryHours: z.number().default(0).description("Run nightly upkeep every N hours. 0 disables the timer."),
+  modelChannel: z.object({
+    apiKeyEnv: z.string().default("").description("Credential ref resolved through DSH, e.g. MAGPIE_GATEWAY_KEY."),
+    baseURL: z.string().default("").description("OpenAI-compatible base URL, e.g. http://127.0.0.1:3425/v1."),
+    model: z.string().default("").description("Model id passed to KRouter as KROUTER_LEARN_MODEL."),
+  }).default({ apiKeyEnv: "", baseURL: "", model: "" }),
+  followAgentModel: z.boolean().default(true).description(
+    "Read the agent's current provider/model from model/selection and reuse that provider's apiKeyEnv + baseURL. Overrides modelChannel when set.",
+  ),
   debug: z.boolean().default(false),
 });
 
@@ -230,6 +415,7 @@ export function apply(ctx, config = {}) {
   registerKrouterTools(ctx, config, defineTool);
   mountMcp(ctx, config);
   mountHooks(ctx, config);
+  mountKeys(ctx, config);
   if (!keyPresent()) {
     console.error(
       "KRouter HOST ACTION: login a Claudian-class CLI (grok / official Codex / claude) or put *_API_KEY on the vault page / ~/.dsh-krouter-keys.env. Chat login is not the timer. Run ./scripts/install.sh to graft the writer.",
