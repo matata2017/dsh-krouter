@@ -190,3 +190,82 @@ finally:
   }).trim()
   assert.equal(out, '1 True', 'an old provisional card is offered for review')
 })
+
+test('KRouter card lifecycle: candidate stays out of the digest until promoted', () => {
+  const script = `
+import sys, tempfile, shutil
+sys.path.insert(0, 'skill/krouter/scripts')
+from pathlib import Path
+import experience
+tmp = Path(tempfile.mkdtemp())
+try:
+    (tmp / '90 系统文件').mkdir(parents=True)
+    p, why = experience.learn(tmp, {'situation': 'a', 'action': 'b', 'result': 'c',
+        'subject': ['probe'], 'lesson': 'when the same thing happens, do this', 'title': 'a card'}, 'src')
+    assert p is not None, why
+    head = p.read_text(encoding='utf-8').split('---')[1]
+    assert 'status: candidate' in head, 'new cards start as candidate'
+    assert 'authority: inferred' in head, 'authority defaults to inferred'
+    assert experience.digest(tmp) == '', 'a candidate does not enter the digest'
+    cid = experience.load_cards(tmp)[0]['id']
+    ok, msg = experience.promote(tmp, cid, 'active')
+    assert ok, msg
+    assert experience.digest(tmp) != '', 'an active card enters the digest'
+    print('ok')
+finally:
+    shutil.rmtree(tmp, ignore_errors=True)
+`
+  const out = execFileSync('python', ['-c', script], {
+    cwd: 'D:/krouter-dsh', encoding: 'utf8',
+    env: { ...process.env, PYTHONIOENCODING: 'utf-8' },
+  }).trim()
+  assert.equal(out, 'ok')
+})
+
+test('KRouter keeps legacy provisional cards in the digest', () => {
+  // Tightening DIGEST_STATUSES to only "active" would have emptied the digest for
+  // every existing card; this pins the backward-compatible behaviour.
+  const script = `
+import sys
+sys.path.insert(0, 'skill/krouter/scripts')
+from pathlib import Path
+import experience
+d = experience.digest(Path('D:/krouter-dsh/vault'))
+cards = experience.load_cards(Path('D:/krouter-dsh/vault'))
+provisional = [c for c in cards if c.get('status') == 'provisional']
+shown = [c['id'] for c in provisional if c['id'] in d]
+print(len(provisional), len(shown))
+`
+  const out = execFileSync('python', ['-c', script], {
+    cwd: 'D:/krouter-dsh', encoding: 'utf8',
+    env: { ...process.env, PYTHONIOENCODING: 'utf-8' },
+  }).trim()
+  const [total, shown] = out.split(' ').map(Number)
+  assert.ok(total > 0, 'the vault has provisional cards')
+  assert.equal(shown, total, 'every provisional card is still in the digest')
+})
+
+test('KRouter marks a user-stated rule as explicit_user', () => {
+  const script = `
+import sys, tempfile, shutil
+sys.path.insert(0, 'skill/krouter/scripts')
+from pathlib import Path
+import experience
+tmp = Path(tempfile.mkdtemp())
+try:
+    (tmp / '90 系统文件').mkdir(parents=True)
+    p, why = experience.learn(tmp, {'situation': 'a', 'action': 'b', 'result': 'c',
+        'subject': ['probe'], 'lesson': 'when the same thing happens, do this',
+        'title': 'a card', 'authority': 'explicit_user'}, 'src')
+    assert p is not None, why
+    assert 'authority: explicit_user' in p.read_text(encoding='utf-8')
+    print('ok')
+finally:
+    shutil.rmtree(tmp, ignore_errors=True)
+`
+  const out = execFileSync('python', ['-c', script], {
+    cwd: 'D:/krouter-dsh', encoding: 'utf8',
+    env: { ...process.env, PYTHONIOENCODING: 'utf-8' },
+  }).trim()
+  assert.equal(out, 'ok')
+})

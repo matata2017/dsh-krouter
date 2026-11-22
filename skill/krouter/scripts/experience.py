@@ -9,11 +9,17 @@ lesson, which a person can read, fix or delete:
     ---
     title: "经验｜整体发平、没有层次时，加一点点反差的东西"
     type: experience-card
-    status: provisional
+    status: candidate
+    authority: inferred
     when: 发平; 平淡; 没有层次; 寡淡; 缺点什么
     source_ref: "[[05 时间日志/会话摘录/2026-01-01｜…]]"
     ---
     - 处境：… - 做法：… - 结果：… - 通用说法：… - 适用于：… - 出处：…
+
+**Lifecycle.** `candidate` (written, never adopted) → `active` (adopted at least once, enters the digest) →
+`dormant` / `archived`. Only `active` and the legacy `provisional` enter the digest, so a card never steers another
+task before it has proved useful. `promote()` rewrites just the `status:` line. `authority` records where the rule
+came from: `explicit_user` (the person stated it) or `inferred` (the agent derived it from a session).
 
 **Writing.** Two ways, neither needs a key. The agent that ran the session writes the card itself: `krouter_learn`
 over MCP, or `experience.py learn` (JSON on stdin) for a host without MCP; `learn()` checks it and writes it. And,
@@ -140,6 +146,10 @@ def load_cards(vault: Path) -> list[dict]:
             "id": meta.get("card_id") or "E" + hashlib.sha1(page.name.encode("utf-8")).hexdigest()[:4],
             "date": meta.get("date") or "",
             "adopted_at": meta.get("adopted_at") or "",
+            # 来源权威：explicit_user = 用户明确说的；inferred = 从会话里推断的。
+            # 旧卡没这个字段时按 inferred 处理（保守：不假设是用户原话）。
+            "authority": (meta.get("authority") or "inferred").lower(),
+            "modified": meta.get("modified") or "",
         })
     return cards
 
@@ -153,6 +163,9 @@ def condition(lesson: str) -> str:
 # ---------- 经验摘要（会话开始时整份交给宿主模型，由它判断处境像不像） ----------
 
 DIGEST_MAX_LINES = 30
+# 单行上限：一条卡的说法再长也不该吃掉整个摘要。pi-experiences 的注入是 3 条 × 2000 字符；
+# 我们用「30 行 × 200 字符」的等价上限，超出的截断而不是整份膨胀。
+DIGEST_LINE_MAX = 200
 IGNORED_AFTER = 3  # 提过这么多次、一次都没被采纳：排到最后
 HEAD = {
     "zh": ("KRouter 经验摘要：别的任务里攒下的经验，不是这个项目的事实，也不保证对。每行是「处境 → 做法〔编号〕」，"
@@ -216,15 +229,23 @@ def ranked(cards: list[dict], used: dict | None = None, vault: Path | None = Non
 
 def digest(vault: Path, max_lines: int = DIGEST_MAX_LINES, cards: list[dict] | None = None,
            used: dict | None = None) -> str:
-    """The whole experience digest the session-start hook gives the host model; "" when there are no cards."""
+    """The whole experience digest the session-start hook gives the host model; "" when there are no cards.
+
+    Only `active` cards enter the digest (see CARD_STATUSES): a card that was written but never adopted stays a
+    candidate and does not steer other tasks. Lines are capped at DIGEST_MAX_LINES and each line at DIGEST_LINE_MAX
+    characters, so the digest stays a bounded hint rather than a growing prompt.
+    """
     cards = load_cards(vault) if cards is None else cards
-    if not cards:
+    # 只有生效的卡进摘要：写下但没用过的是 candidate，不拿去影响别的任务
+    live = [c for c in cards if c.get("status") in DIGEST_STATUSES]
+    if not live:
         return ""
-    lang = lang_of(cards)
-    shown = ranked(cards, usage(vault) if used is None else used, vault)[:max_lines]
-    out = [HEAD[lang].format(folder=zones.real(vault, FOLDER))] + [digest_line(c, lang) for c in shown]
-    if len(cards) > len(shown):
-        out.append(MORE[lang].format(n=len(cards) - len(shown), k=max_lines))
+    lang = lang_of(live)
+    shown = ranked(live, usage(vault) if used is None else used, vault)[:max_lines]
+    out = [HEAD[lang].format(folder=zones.real(vault, FOLDER))]
+    out += [digest_line(c, lang)[:DIGEST_LINE_MAX] for c in shown]
+    if len(live) > len(shown):
+        out.append(MORE[lang].format(n=len(live) - len(shown), k=max_lines))
     out.append(USE[lang])
     return redact("\n".join(out))
 
@@ -232,6 +253,20 @@ def digest(vault: Path, max_lines: int = DIGEST_MAX_LINES, cards: list[dict] | N
 # ---------- 使用记录：经验被提出、被采纳（会话导入时从记录里读，不调模型） ----------
 
 USES = "90 系统文件/自动化/经验卡使用记录.jsonl"
+
+# ---------- 状态机：候选 → 生效 → 沉睡 → 归档 ----------
+#
+# `candidate` 写下来但还没被采纳过；`active` 已经被采纳过至少一次（或用 same_as 记过 again）。
+# `dormant` 长期没人用；`archived` 明确不再用。只有 active 进摘要，candidate 只在本会话内可见。
+# 这样一条卡不会因为"写下来了"就立刻影响别的任务——先证明它真的有用。
+CANDIDATE, ACTIVE, DORMANT, ARCHIVED = "candidate", "active", "dormant", "archived"
+CARD_STATUSES = (CANDIDATE, ACTIVE, DORMANT, ARCHIVED)
+# 进摘要的状态：active（已采纳过）和 provisional（旧卡与人工手写的卡）。
+# 把 provisional 也算进来是因为：收紧成只认 active 会把现有全部卡一次性清空（实测 3/3 都是
+# provisional），那是行为突变而不是改进。candidate 才是不进摘要的那一档。
+DIGEST_STATUSES = {ACTIVE, "provisional"}
+# 采纳过一次就生效；这条规则让"写下即生效"变成"用过才生效"
+PROMOTE_ON_ADOPT = True
 # 采纳的判据要保守：提出经验的那一轮之后，下一句话明说照做了、或说管用了。拿不准的只记"被提出"
 ADOPT = re.compile(r"(就?(按|照)(你说的|这个|这条|这样|你的)|就这么(做|办|来|改)|试了.{0,12}(好了|可以了|行了|管用|有用|解决)|"
                    r"果然|确实是这个|管用|有用|这招|学到了|"
@@ -312,6 +347,13 @@ def record_uses(vault: Path, session: str, turns: list[dict]) -> int:
         with path.open("a", encoding="utf-8") as fh:
             for ev in new:
                 fh.write(json.dumps({"at": ev["turn"][:19] or date.today().isoformat(), **ev}, ensure_ascii=False) + "\n")
+        # 采纳过一次的 candidate 转成 active：从「写下来了」变成「用过、站得住」。
+        if PROMOTE_ON_ADOPT:
+            by_id = {c["id"]: c for c in cards}
+            for cid in {ev["card"] for ev in new if ev["kind"] == "adopted"}:
+                card = by_id.get(cid)
+                if card and card.get("status") == CANDIDATE:
+                    promote(vault, cid, ACTIVE)
     return len(new)
 
 
@@ -613,7 +655,7 @@ def file_name(title: str) -> str:
 
 
 def page_text(card: dict, source: str, day: str, writer: str = "krouter-capture",
-              modified: str = "") -> str:
+              modified: str = "", authority: str = "inferred", status: str = "provisional") -> str:
     when = "; ".join(card["when"])
     zh = bool(ri.CJK_RE.search(card["lesson"] + card["title"]))
     fm_when = f"when: {when}\n" if when else ""
@@ -625,7 +667,8 @@ def page_text(card: dict, source: str, day: str, writer: str = "krouter-capture"
     head = ("---\n"
             f"title: \"{title}\"\n"
             f"type: {TYPE}\n"
-            "status: provisional\n"
+            f"status: {status}\n"
+            f"authority: {authority}\n"
             f"{fm_when}"
             f"source_ref: \"{source}\"\n"
             f"date: {day}\n"
@@ -640,6 +683,35 @@ def page_text(card: dict, source: str, day: str, writer: str = "krouter-capture"
     return head + (f"- Situation: {card['situation']}\n- Action: {card['action']}\n- Result: {card['result']}\n"
                    f"- Lesson: {card['lesson']}\n" + (f"- When: {'; '.join(card['when'])}\n" if when else "")
                    + f"- Source: {source} (taken from a session, not checked by anyone; fix or delete it if wrong)\n")
+
+
+def promote(vault: Path, card_id: str, to: str = ACTIVE) -> tuple[bool, str]:
+    """Move one card to another status by rewriting only its `status:` line.
+
+    `candidate → active` is the normal promotion: the card was adopted at least once, so it may now steer other
+    tasks. `active → dormant/archived` retires it. Returns (changed, message); the body is never touched.
+    """
+    if to not in CARD_STATUSES:
+        return False, f"unknown status {to!r}; use one of {', '.join(CARD_STATUSES)}"
+    for card in load_cards(vault):
+        if card["id"] != card_id:
+            continue
+        path = vault / card["rel"]
+        text = path.read_text(encoding="utf-8")
+        new, n = re.subn(r"^status:\s*\S+\s*$", f"status: {to}", text, count=1, flags=re.M)
+        if n == 0:
+            return False, f"{card_id}: no status line to rewrite"
+        if new == text:
+            return False, f"{card_id}: already {to}"
+        path.write_text(new, encoding="utf-8")
+        return True, f"{card_id}: {card.get('status') or '?'} → {to}"
+    return False, f"{card_id}: no such card"
+
+
+def adopt_and_promote(vault: Path, card_id: str, source: str = "") -> tuple[bool, str]:
+    """Record one adoption and promote a candidate to active in the same step."""
+    record_uses(vault, source or "manual", [{"ask": "", "answer": f"〔{card_id}〕", "ts": ""}])
+    return promote(vault, card_id, ACTIVE)
 
 
 def record_again(vault: Path, card_id: str, source: str, why: str) -> None:
@@ -659,8 +731,14 @@ def lexical_twin(vault: Path, lesson: str) -> dict | None:
     return next((c for c in load_cards(vault) if same_lesson(lesson, c["lesson"])), None)
 
 
-def write_card(vault: Path, card: dict, source: str, day: str, writer: str = "krouter-capture") -> Path | None:
-    """Write one checked card; None when a card with the same lesson is already there (recorded as seen again)."""
+def write_card(vault: Path, card: dict, source: str, day: str, writer: str = "krouter-capture",
+               authority: str = "inferred", status: str = "provisional") -> Path | None:
+    """Write one checked card; None when a card with the same lesson is already there (recorded as seen again).
+
+    `authority`: "explicit_user" when the person stated the rule in their own words, "inferred" when the agent
+    derived it from a session. Memento draws the same line: an inferred lesson needs captured attempt → result
+    evidence, a stated one needs the person's own quote.
+    """
     from datetime import datetime
 
     twin = lexical_twin(vault, card["lesson"])
@@ -673,7 +751,8 @@ def write_card(vault: Path, card: dict, source: str, day: str, writer: str = "kr
     if path.exists():
         path = path.with_name(path.stem + "-" + hashlib.sha1(card["lesson"].encode()).hexdigest()[:6] + ".md")
     path.write_text(page_text(card, source, day, writer,
-                              modified=datetime.now().isoformat(timespec="seconds")), encoding="utf-8")
+                              modified=datetime.now().isoformat(timespec="seconds"),
+                              authority=authority, status=status), encoding="utf-8")
     return path
 
 
@@ -698,7 +777,11 @@ def learn(vault: Path, item: dict, source: str, writer: str = "krouter-learn") -
     card = valid(item, None)
     if not card:
         return None, "not written: fill situation, action, result and lesson; no key-shaped text"
-    path = write_card(vault, card, source, date.today().isoformat(), writer)
+    # authority 由调用方声明：用户原话写下的规则是 explicit_user，其余按 inferred 处理。
+    # 新卡一律先落成 candidate：它不影响别的任务，直到被采纳过一次。
+    authority = "explicit_user" if str(item.get("authority") or "").lower() == "explicit_user" else "inferred"
+    path = write_card(vault, card, source, date.today().isoformat(), writer,
+                      authority=authority, status=CANDIDATE)
     if path:
         return path, ""
     twin = lexical_twin(vault, card["lesson"])
