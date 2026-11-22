@@ -334,3 +334,38 @@ finally:
   }).trim()
   assert.equal(out, '1 active', 'a direct adoption records adopted and promotes')
 })
+
+test('KRouter treats a card with no status field as provisional, not as invisible', () => {
+  // A hand-written card easily omits `status:`. An empty status falls outside every
+  // set and silently drops the card from the digest; this pins the fallback.
+  const script = `
+import sys, tempfile, shutil
+sys.path.insert(0, 'skill/krouter/scripts')
+from pathlib import Path
+import experience
+tmp = Path(tempfile.mkdtemp())
+try:
+    d = tmp / '02 经验与方法' / '经验卡'
+    d.mkdir(parents=True)
+    (d / 'nostatus.md').write_text('''---
+title: "经验｜没写状态"
+type: experience-card
+date: 2026-01-01
+---
+
+- 处境：a
+- 做法：b
+- 结果：c
+- 通用说法：同类情况发生时按这个做
+''', encoding='utf-8')
+    card = experience.load_cards(tmp)[0]
+    print(card['status'], card['id'] in experience.digest(tmp))
+finally:
+    shutil.rmtree(tmp, ignore_errors=True)
+`
+  const out = execFileSync('python', ['-c', script], {
+    cwd: 'D:/krouter-dsh', encoding: 'utf8',
+    env: { ...process.env, PYTHONIOENCODING: 'utf-8' },
+  }).trim()
+  assert.equal(out, 'provisional True', 'a missing status falls back to provisional and stays in the digest')
+})

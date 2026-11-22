@@ -142,7 +142,9 @@ def load_cards(vault: Path) -> list[dict]:
             "lesson": lesson,
             "condition": condition(lesson),
             "source": meta.get("source_ref") or f.get("出处", ""),
-            "status": (meta.get("status") or "").lower(),
+            # 没写 status 的卡按 provisional 处理：手写一张卡很容易漏这个字段，
+            # 空字符串会让它落在所有集合之外、从摘要里静默消失。
+            "status": (meta.get("status") or "provisional").strip().lower(),
             "id": meta.get("card_id") or "E" + hashlib.sha1(page.name.encode("utf-8")).hexdigest()[:4],
             "date": meta.get("date") or "",
             "adopted_at": meta.get("adopted_at") or "",
